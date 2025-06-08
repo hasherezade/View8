@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 import argparse
 import os
 from Parser.parse_v8cache import parse_v8cache_file, parse_disassembled_file
@@ -34,8 +35,8 @@ def export_to_file(out_name, all_functions, format_list):
 
 def main():
     parser = argparse.ArgumentParser(description="View8: V8 cache decompiler.")
-    parser.add_argument('input_file', help="The input file name.")
-    parser.add_argument('output_file', help="The output file name.")
+    parser.add_argument('--inp', '-i', help="The input file name.", default=None, required=True)
+    parser.add_argument('--out', '-o', help="The output file name.", default=None, required=True)
     parser.add_argument('--path', '-p', help="Path to disassembler binary.", default=None)
     parser.add_argument('--disassembled', '-d', action='store_true', help="Indicate if the input file is already disassembled.")
     parser.add_argument('--export_format', '-e', nargs='+', choices=['v8_opcode', 'translated', 'decompiled'], 
@@ -44,12 +45,12 @@ def main():
 
     args = parser.parse_args()
     
-    if not os.path.isfile(args.input_file):
-        raise FileNotFoundError(f"The input file {args.input_file} does not exist.")
+    if not os.path.isfile(args.inp):
+        raise FileNotFoundError(f"The input file {args.inp} does not exist.")
 
-    all_func = disassemble(args.input_file, args.disassembled, args.path)
+    all_func = disassemble(args.inp, args.disassembled, args.path)
     decompile(all_func)
-    export_to_file(args.output_file, all_func, args.export_format)
+    export_to_file(args.out, all_func, args.export_format)
     print(f"Done.")
 
 
