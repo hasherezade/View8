@@ -1,6 +1,7 @@
 from Translate.translate import translate_bytecode
 from Simplify.simplify import simplify_translated_bytecode
-
+import pickle
+from typing import List, Optional
 
 class CodeLine:
     def __init__(self, opcode="", line="", inst="", translated="", decompiled=""):
@@ -70,3 +71,27 @@ class SharedFunctionInfo:
             if export_line:
                 export_func += export_line + '\n'
         return export_func
+
+####
+
+# Helper functions for serializing and deserializing
+def serialize_functions(functions: List[SharedFunctionInfo]) -> bytes:
+    """Serialize a list of SharedFunctionInfo objects"""
+    return pickle.dumps(functions, protocol=pickle.HIGHEST_PROTOCOL)
+
+
+def deserialize_functions(data: bytes) -> List[SharedFunctionInfo]:
+    """Deserialize a list of SharedFunctionInfo objects"""
+    return pickle.loads(data)
+
+
+def save_functions_to_file(functions: List[SharedFunctionInfo], filename: str):
+    """Save multiple functions to a file"""
+    with open(filename, 'wb') as f:
+        f.write(serialize_functions(functions))
+
+
+def load_functions_from_file(filename: str) -> List[SharedFunctionInfo]:
+    """Load multiple functions from a file"""
+    with open(filename, 'rb') as f:
+        return deserialize_functions(f.read())
