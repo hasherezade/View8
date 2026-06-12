@@ -13,6 +13,7 @@ from view8_util import (
     print_funcs,
     save_trees,
     split_trees,
+    split_usage_trees
 )
 ####
 
@@ -70,7 +71,9 @@ def main():
                         default=['decompiled'])
     parser.add_argument('--scope', help="Propagate scope arguments.", default=1, type=int, required=False)
     parser.add_argument('--tree', '-t', help="Show functions tree, starting from a given node. To start from the default main function, use 'start'", default=None)
-    parser.add_argument('--mainlimit', '-l', help="In tree mode: a tree with depth above this limit will be treated as different module than main", type=int, default=1)
+    parser.add_argument('--mainlimit', '-l', help="Maximum branch size included in the main output file (works in tree mode)", type=int, default=1)
+    parser.add_argument('--split_depth', '-d',help="Maximum usage-graph depth counted from the selected tree root (works in tree mode)", type=int, default=4)
+    parser.add_argument('--split_mode', help="A mode in which the tree will be built if function splitting was requested", choices=['declarers', 'calls', 'references'], default='declarers')
     parser.add_argument('--include', '-n', help="Functions to Include (file containing a list)", default=None)
     parser.add_argument('--exclude', '-x', help="Functions to Exclude (file containing a list)", default=None)
     parser.add_argument('--func', help="A function to be displayed.", default=None, required=False)
@@ -78,6 +81,9 @@ def main():
     parser.add_argument('--verbosity', '-v', help="Verbosity level (0-3)", default=0, type=int, required=False)
     args = parser.parse_args()
     
+    if args.split_depth < 1:
+        parser.error("--split_depth must be at least 1")
+
     if not os.path.isfile(args.inp):
         raise FileNotFoundError(f"The input file {args.inp} does not exist.")
 
@@ -127,7 +133,13 @@ def main():
         if not tree_root:
             print("Error: tree root function not found.")
             return
-        items_map = split_trees(all_func, tree_root)
+        if args.split_mode == 'declarers':
+            items_map = split_trees(all_func, tree_root)
+        else:
+            _calls_only=True
+            if args.split_mode == 'references':
+                _calls_only=False
+            items_map = split_usage_trees(all_func, tree_root, _calls_only, max_depth=args.split_depth)
         if items_map is None:
             print(f"Error: could not build tree from root '{tree_root}'.")
             return

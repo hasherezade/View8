@@ -58,11 +58,12 @@ def _rename_functions(
     new_functions: dict[str, SharedFunctionInfo] = {}
 
     for name, func in functions.items():
+        if func.declarer in renamed_dict:
+            func.declarer = renamed_dict[func.declarer]
+
         if name in renamed_dict:
             new_name = renamed_dict[name]
             func.name = new_name
-            if func.declarer in renamed_dict:
-                func.declarer = renamed_dict[func.declarer]
             new_functions[new_name] = func
             renamed_count += 1
         else:
@@ -302,3 +303,131 @@ def save_trees(all_functions, main_func, main_limit, items_map, out_dir, export_
 
 ###
 
+FUNC_REF_RE = re.compile(r'\b(func_[A-Za-z0-9_$]+)\b')
+FUNC_CALL_RE = re.compile(r'\b(func_[A-Za-z0-9_$]+)\s*\(')
+
+
+def get_used_functions(functions, curr_func, calls_only=True):
+    """
+    Return functions directly used by curr_func.
+
+    In calls-only mode, collect visible textual invocations.
+    In reference mode, collect all visible textual references.
+    """
+    func = functions.get(curr_func)
+    if func is None or not func.visible:
+        return set()
+
+    regex = FUNC_CALL_RE if calls_only else FUNC_REF_RE
+    used = set()
+
+    indx = -1
+    while True:
+        indx = next_visible_line(func, indx)
+        if indx is None:
+            break
+
+        line = func.code[indx].decompiled
+        for name in regex.findall(line):
+            if name == curr_func:
+                continue
+            if name not in functions:
+                continue
+            if not functions[name].visible:
+                continue
+            used.add(name)
+
+    return used
+
+
+def build_usage_map(functions, calls_only=True):
+    """
+    Build adjacency map:
+        function -> directly used functions
+    """
+    usage_map = {}
+
+    for name, func in functions.items():
+        if not func.visible:
+            continue
+        usage_map[name] = get_used_functions(
+            functions,
+            name,
+            calls_only=calls_only
+        )
+
+    return usage_map
+
+
+def collect_reachable_functions(
+    usage_map,
+    start_func,
+    max_depth=None,
+    initial_depth=0,
+    blocked=None
+):
+    """
+    Collect nodes reachable from start_func.
+
+    blocked:
+        Nodes that must not be entered. This prevents a branch from
+        looping back through the selected split root and absorbing
+        sibling branches.
+    """
+    blocked = set() if blocked is None else set(blocked)
+    visited = set()
+    stack = [(start_func, initial_depth)]
+
+    while stack:
+        curr_func, depth = stack.pop()
+
+        if curr_func in blocked or curr_func in visited:
+            continue
+
+        if max_depth is not None and depth > max_depth:
+            continue
+
+        visited.add(curr_func)
+
+        if max_depth is not None and depth == max_depth:
+            continue
+
+        for child in usage_map.get(curr_func, set()):
+            stack.append((child, depth + 1))
+
+    return visited
+
+
+def split_usage_trees(functions, curr_func, calls_only=True, max_depth=None):
+    """
+    Return independently exportable usage-rooted branches.
+
+    Each direct usage of curr_func becomes a branch root.
+    Shared dependencies may intentionally appear in multiple branches.
+    """
+    if curr_func not in functions:
+        return None
+
+    usage_map = build_usage_map(functions, calls_only=calls_only)
+    children = sorted(usage_map.get(curr_func, set()))
+
+    items_map = {}
+
+    for child in children:
+        reachable = collect_reachable_functions(
+            usage_map,
+            child,
+            max_depth=max_depth,
+            initial_depth=1,
+            blocked={curr_func}
+        )
+
+        items_map[child] = {
+            name: functions[name]
+            for name in reachable
+            if name in functions
+        }
+
+    return dict(
+        sorted(items_map.items(), key=lambda item: len(item[1]))
+    )
