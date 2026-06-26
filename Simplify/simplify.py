@@ -66,6 +66,18 @@ def is_reg_defined_in_reg_value(reg, value):
         idx = value.find(reg, idx + 1)
 
 
+def value_may_have_side_effects(value):
+    """
+    Return True for values that should not be duplicated by substitution.
+
+    The simplifier stores the accumulator as an expression and later inlines it.
+    That is fine for constants/arithmetic, but unsafe for calls/constructors: if a
+    Call* result is copied with StarN and a later Return inlines ACCU again, the
+    decompiled output appears to call the function twice.
+    """
+    return bool(re.search(r"[\w\]]\s*\(", value))
+
+
 def create_loop_reg_scope(prev_reg_scope):
     reg_scope = {}
     # Because loop regs can be overwritten during loop iteration we define prev scope as overwritten
@@ -205,6 +217,61 @@ class SimplifyCode:
         if reg_is_constant(reg, value):
             reg_scope[reg] = Register(value, self.line_index)
 
+    def find_previous_store_of_accu_value(self, value):
+        """
+        Find the most recent visible register assignment that materialized the
+        current accumulator value. Used to avoid emitting the same side-effectful
+        expression again at Return.
+        """
+        for idx in range(self.line_index - 1, -1, -1):
+            line_obj = self.code[idx]
+            if not line_obj.visible or not line_obj.decompiled:
+                continue
+
+            line = line_obj.decompiled.strip()
+            match = re.match(r"^([ra]\d+) = (.+)$", line)
+            if match and match.group(2) == value:
+                return match.group(1)
+
+            # Do not scan past another explicit accumulator assignment.
+            if line.startswith("ACCU = "):
+                break
+
+        return None
+
+    def simplify_return_line(self, line, reg_scope):
+        """
+        Simplify `return ACCU` without duplicating calls.
+
+        Example bytecode pattern:
+            CallProperty1 ...   -> ACCU = callee(arg)
+            Star0               -> r0 = ACCU
+            Return              -> return ACCU
+
+        The old simplifier produced:
+            r0 = callee(arg)
+            return callee(arg)
+
+        This is misleading because the bytecode calls callee only once. Prefer
+        the materialized register when the accumulator expression may have side
+        effects.
+        """
+        if line.strip() != "return ACCU":
+            return None
+
+        accu = reg_scope.get("ACCU")
+        if not accu or accu.was_overwritten:
+            return None
+
+        if not value_may_have_side_effects(accu.value):
+            return None
+
+        stored_reg = self.find_previous_store_of_accu_value(accu.value)
+        if stored_reg:
+            return f"return {stored_reg}"
+
+        return None
+
     def simplify_line(self, line, reg_scope, prev_reg_scope, overwritten_regs):
         # Handle context change
         if "PopContext" in line or "PushContext" in line:
@@ -217,6 +284,9 @@ class SimplifyCode:
 
         # replace constant regs
         if not re.search(r"^(ACCU|CASE_\d+|[ra]\d+) = ", line):
+            simplified_return = self.simplify_return_line(line, reg_scope)
+            if simplified_return is not None:
+                return simplified_return
             return self.replace_reg_with_constant(line, reg_scope)
 
         reg, value = line.split(" = ", 1)
