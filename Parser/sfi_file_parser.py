@@ -81,7 +81,7 @@ def parse_const_line(lines, func_name):
         raw = value.split("#", 1)[-1]
         if raw.endswith(">"):
             raw = raw[:-1]
-        value = json.dumps(raw) #.replace('"', '\\"')
+        value = json.dumps(raw) #.replace('"', '\"')
         #return var_idx, f'"{value}"'
         return var_idx, value
     if value.startswith("<SharedFunctionInfo"):

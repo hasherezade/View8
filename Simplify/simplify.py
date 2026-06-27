@@ -66,18 +66,6 @@ def is_reg_defined_in_reg_value(reg, value):
         idx = value.find(reg, idx + 1)
 
 
-def value_may_have_side_effects(value):
-    """
-    Return True for values that should not be duplicated by substitution.
-
-    The simplifier stores the accumulator as an expression and later inlines it.
-    That is fine for constants/arithmetic, but unsafe for calls/constructors: if a
-    Call* result is copied with StarN and a later Return inlines ACCU again, the
-    decompiled output appears to call the function twice.
-    """
-    return bool(re.search(r"[\w\]]\s*\(", value))
-
-
 def create_loop_reg_scope(prev_reg_scope):
     reg_scope = {}
     # Because loop regs can be overwritten during loop iteration we define prev scope as overwritten
@@ -217,11 +205,21 @@ class SimplifyCode:
         if reg_is_constant(reg, value):
             reg_scope[reg] = Register(value, self.line_index)
 
+
     def find_previous_store_of_accu_value(self, value):
         """
         Find the most recent visible register assignment that materialized the
-        current accumulator value. Used to avoid emitting the same side-effectful
-        expression again at Return.
+        current accumulator value.
+
+        Bytecode often ends with:
+            <compute value into ACCU>
+            StarN        -> rN = ACCU
+            Return       -> return ACCU
+
+        Once the StarN line has been materialized as `rN = <expr>`, returning
+        `<expr>` duplicates the expression in the pseudocode. For calls this is
+        semantically dangerous because it looks like a second call; for pure
+        expressions it is still noisy and contradicts the bytecode shape.
         """
         for idx in range(self.line_index - 1, -1, -1):
             line_obj = self.code[idx]
@@ -241,29 +239,27 @@ class SimplifyCode:
 
     def simplify_return_line(self, line, reg_scope):
         """
-        Simplify `return ACCU` without duplicating calls.
+        Simplify `return ACCU` without duplicating an accumulator expression
+        that was already materialized into a register.
 
-        Example bytecode pattern:
-            CallProperty1 ...   -> ACCU = callee(arg)
-            Star0               -> r0 = ACCU
-            Return              -> return ACCU
+        Example:
+            ACCU = ("Hello" + ", World!")
+            r0 = ACCU
+            return ACCU
 
-        The old simplifier produced:
-            r0 = callee(arg)
-            return callee(arg)
+        Old output:
+            r0 = ("Hello" + ", World!")
+            return ("Hello" + ", World!")
 
-        This is misleading because the bytecode calls callee only once. Prefer
-        the materialized register when the accumulator expression may have side
-        effects.
+        Better output:
+            r0 = ("Hello" + ", World!")
+            return r0
         """
         if line.strip() != "return ACCU":
             return None
 
         accu = reg_scope.get("ACCU")
         if not accu or accu.was_overwritten:
-            return None
-
-        if not value_may_have_side_effects(accu.value):
             return None
 
         stored_reg = self.find_previous_store_of_accu_value(accu.value)
