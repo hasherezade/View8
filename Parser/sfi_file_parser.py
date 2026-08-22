@@ -124,6 +124,38 @@ def parse_const_array(lines, func_name):
 def parse_const_pool(line, lines, func_name):
     if "size = 0" in line:
         return []
+
+    size_match = re.search(r"size\s*=\s*(\d+)", line)
+    if not size_match:
+        raise ValueError(f"Invalid constant-pool header: {line}")
+    size = int(size_match.group(1))
+
+    # Analysis-only V8 13.x output used when the code cache was built against
+    # a different read-only snapshot. It deliberately avoids dereferencing
+    # constant-pool HeapObjects and prints one raw tagged value per slot.
+    first = next(lines)
+    if re.match(r"^\[\d+\]\s+raw=0x[0-9a-fA-F]+", first):
+        values = []
+        current = first
+        for expected_idx in range(size):
+            match = re.match(
+                r"^\[(\d+)\]\s+raw=(0x[0-9a-fA-F]+)(?:\s+Smi=(-?\d+)|\s+HeapObject)?$",
+                current,
+            )
+            if not match:
+                raise ValueError(f"Invalid raw constant-pool line: {current}")
+            idx, raw, smi = match.groups()
+            if int(idx) != expected_idx:
+                raise ValueError(
+                    f"Unexpected raw constant-pool index {idx}, expected {expected_idx}"
+                )
+            values.append(smi if smi is not None else f"RawConst_{raw}")
+            if expected_idx + 1 < size:
+                current = next(lines)
+        return values
+
+    # Legacy recursive FixedArray printer. Put the first consumed line back.
+    set_repeat_line_flag(True)
     return parse_const_array(lines, func_name)
 
 
@@ -153,7 +185,12 @@ def parse_register_count(line):
 
 
 def parse_address(line):
-    return parse("{}: [{}] in {}", line)[0]
+    # V8 <= 10.x printed e.g. "0x...: [SharedFunctionInfo] in OldSpace".
+    # Newer V8 versions omit the trailing "in ...". Accept both.
+    match = re.match(r"^(0x[0-9a-fA-F]+):\s+\[[^\]]+\](?:\s+in\s+.*)?$", line)
+    if not match:
+        raise ValueError(f"Invalid object address line: {line}")
+    return match.group(1)
 
 
 def parse_shared_function_info(lines, name, declarer=None):

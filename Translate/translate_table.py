@@ -1,4 +1,5 @@
 import ast
+import re
 
 
 def expand_reg_list(reg_rang):
@@ -75,6 +76,73 @@ def get_scope_id(args):
     return f"{args[0]}-{args[2][1:-1]}"
 
 
+def add_jump_blocks_from_any_operand(obj, type_):
+    """Like add_jump_blocks(), but supports jumps whose target is not the last operand.
+
+    V8 13.x JumpIfForInDone* has:
+        <jump>, <index>, <cache_length>
+    so the normal add_jump_blocks() helper cannot use obj.args[-1].
+    The disassembler annotates the resolved target as "... @ <offset>)";
+    search all operands for that annotation.
+    """
+    joined = ", ".join(obj.args)
+    match = re.search(r"@\s*(-?\d+)\)", joined)
+    if not match:
+        return False
+
+    jump_to = int(match.group(1))
+    if jump_to < obj.offset:
+        obj.add_jump_to_table(jump_type="Loop", start=jump_to, end=obj.offset)
+    else:
+        obj.add_jump_to_table(jump_type=type_, start=obj.offset, end=jump_to)
+    return True
+
+
+def strip_jump_annotation(arg):
+    """Remove V8's trailing '(0x... @ target)' annotation from an operand."""
+    return arg.split(" (", 1)[0].strip()
+
+
+def jump_if_for_in_done(obj):
+    """Translate V8 13.x JumpIfForInDone and JumpIfForInDoneConstant.
+
+    V8 semantics: branch when the for-in enumeration index equals the cached
+    enumeration length.
+    """
+    add_jump_blocks_from_any_operand(obj, "If")
+    index_reg = strip_jump_annotation(obj.args[1])
+    cache_length_reg = strip_jump_annotation(obj.args[2])
+    return f"if ({index_reg} == {cache_length_reg})"
+
+
+def find_non_default_constructor_or_construct(obj):
+    """Represent the V8 13.x two-register result conservatively."""
+    outputs = expand_reg_list(obj.args[2])
+    if len(outputs) == 2:
+        return (
+            f"{outputs[0]}, {outputs[1]} = "
+            f"FindNonDefaultConstructorOrConstruct({obj.args[0]}, {obj.args[1]})"
+        )
+    return (
+        f"FindNonDefaultConstructorOrConstruct("
+        f"{obj.args[0]}, {obj.args[1]}, {obj.args[2]})"
+    )
+
+
+_unsupported_operators = set()
+
+
+def unsupported_operator(obj):
+    """Do not stop a 20k-function decompilation for an unknown bytecode."""
+    if obj.operator not in _unsupported_operators:
+        print(f"Operator {obj.operator} is not supported; preserving as comment")
+        _unsupported_operators.add(obj.operator)
+
+    args = ", ".join(obj.args)
+    suffix = f" {args}" if args else ""
+    return f"// Unsupported bytecode: {obj.operator}{suffix}"
+
+
 operands = {
     #################
     # call operands #
@@ -95,6 +163,8 @@ operands = {
     "InvokeIntrinsic": lambda obj: invoke_intrinsic(obj.args),
     "Construct": lambda obj: f"ACCU = {obj.args[0]}({', '.join(expand_reg_list(obj.args[1]))})",
     "ConstructWithSpread": lambda obj: f"ACCU = {obj.args[0]}(...{', '.join(expand_reg_list(obj.args[1]))}))",
+    "ConstructForwardAllArgs": lambda obj: f"ACCU = ConstructForwardAllArgs({obj.args[0]}, ACCU, ...arguments)",
+    "FindNonDefaultConstructorOrConstruct": lambda obj: find_non_default_constructor_or_construct(obj),
 
     ###################
     # Create operands #
@@ -127,6 +197,7 @@ operands = {
     "JumpIfToBooleanTrue": lambda obj: add_jump_blocks(obj, "If") or "if (ACCU)",
     "JumpIfToBooleanFalse": lambda obj: add_jump_blocks(obj, "If") or "if (!ACCU)",
     "JumpIfJSReceiver": lambda obj: add_jump_blocks(obj, "IfJSReceiver") or "if (JumpIfJSReceiver(ACCU))",
+    "JumpIfForInDone": lambda obj: jump_if_for_in_done(obj),
 
     "JumpConstant": lambda obj: add_jump_blocks(obj, "Jump") or "",
     "JumpLoopConstant": lambda obj: add_jump_blocks(obj, "JumpLoop") or "",
@@ -140,6 +211,7 @@ operands = {
     "JumpIfToBooleanTrueConstant": lambda obj: add_jump_blocks(obj, "If") or "if (ACCU)",
     "JumpIfToBooleanFalseConstant": lambda obj: add_jump_blocks(obj, "If") or "if (!ACCU)",
     "JumpIfJSReceiverConstant": lambda obj: add_jump_blocks(obj, "IfJSReceiver") or "if (!JumpIfJSReceiver(ACCU))",
+    "JumpIfForInDoneConstant": lambda obj: jump_if_for_in_done(obj),
 
     #################
     # Load operands #
@@ -180,6 +252,7 @@ operands = {
     "GetNamedPropertyFromSuper": lambda obj: f"ACCU = ACCU[ConstPoolLiteral{obj.args[1]}]",
     "GetNamedProperty": lambda obj: f"ACCU = {obj.args[0]}[ConstPoolLiteral{obj.args[1]}]",
     "GetKeyedProperty": lambda obj: f"ACCU = {obj.args[0]}[ACCU]",
+    "GetEnumeratedKeyedProperty": lambda obj: f"ACCU = {obj.args[0]}[ACCU]",
     "GetTemplateObject": lambda obj: f"ACCU = ConstPool{obj.args[0]}",
     "LdaKeyedProperty": lambda obj: f"ACCU = {obj.args[0]}[ACCU]",
     "LdaCurrentContextSlot": lambda obj: f"ACCU = Scope[CURRENT]{obj.args[0]}",
@@ -252,6 +325,7 @@ operands = {
     "ToNumber": lambda obj: f"ACCU = Number(ACCU)",
     "ToObject": lambda obj: f"ACCU = ToObject(ACCU)",
     "ToName": lambda obj: f"ACCU = ToName(ACCU)",
+    "ToBoolean": lambda obj: f"ACCU = Boolean(ACCU)",
     "ToBooleanLogicalNot": lambda obj: f"ACCU = !Boolean(ACCU)",
     "CloneObject": lambda obj: f"ACCU = CloneObject({obj.args[0]})",
 
@@ -351,7 +425,7 @@ operands = {
     "ForInNext": lambda obj: f"ACCU = {obj.args[0]}.next().value",
     "ForInStep": lambda obj: f"ACCU = GeneratorStep({obj.args[0]})",
 
-    "Not Found": lambda obj: input(f"Operator {obj.operator} was not found in table") and f"//{obj.operator})",
+    "Not Found": lambda obj: unsupported_operator(obj),
 
 }
 
