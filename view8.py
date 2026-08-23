@@ -50,6 +50,30 @@ def disassemble(in_file, input_is_disassembled, disassembler):
 
 def decompile(all_functions):
     global_vars = GlobalVars()
+
+    # V8 13 analysis mode can preserve a SharedFunctionInfo's name only as an
+    # opaque pointer identity.  The same identity is used by LdaGlobal when it
+    # refers to that internalized name.  Bind only one-to-one identities: the
+    # empty string and other shared names can legitimately occur on many SFIs,
+    # and guessing in those cases would create false function calls.
+    name_ref_candidates = {}
+    for func_name, func in all_functions.items():
+        ref = getattr(func, "name_ref", None)
+        if not ref:
+            continue
+        name_ref_candidates.setdefault(ref.lower(), []).append(func_name)
+
+    global_vars.opaque_func_refs = {
+        ref: names[0]
+        for ref, names in name_ref_candidates.items()
+        if len(names) == 1
+    }
+    if global_vars.opaque_func_refs:
+        print(
+            f"Correlated {len(global_vars.opaque_func_refs)} unique opaque "
+            "global-name reference(s) with SharedFunctionInfo objects."
+        )
+
     print(f"Decompiling {len(all_functions)} functions.")
     for name in list(all_functions)[::-1]:
         all_functions[name].decompile(global_vars)

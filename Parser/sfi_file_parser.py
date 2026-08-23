@@ -5,6 +5,7 @@ import json
 
 all_functions = {}
 repeat_last_line = False
+known_constant_values = {}
 
 
 def set_repeat_line_flag(flag):
@@ -64,6 +65,63 @@ def parse_bytecode(line, lines):
     return code_list
 
 
+
+def _decode_printed_string(value):
+    """Convert V8's <String[n]: #...> representation to a quoted literal."""
+    raw = value.split("#", 1)[-1]
+    if raw.endswith(">"):
+        raw = raw[:-1]
+    return json.dumps(raw)
+
+
+def collect_known_constant_values(file):
+    """Pre-scan a disassembly for safely printed constant values.
+
+    The V8 13 analysis printer intentionally leaves many cache-local constants
+    opaque as RawConst_0x.... The same heap object is often used in another
+    function as an LdaConstant and therefore printed safely as a String.  Heap
+    addresses are stable for the lifetime of one disassembly run, so those
+    clear occurrences can be used to resolve opaque occurrences elsewhere.
+    """
+    known_constant_values.clear()
+    conflicts = 0
+    line_re = re.compile(
+        r"^\d+(?:\-\d+)?:\s+(0x[0-9a-fA-F]+)\s+(.+)$"
+    )
+
+    with open(file, encoding="utf-8", errors="ignore") as f:
+        for raw_line in f:
+            line = raw_line.strip()
+            match = line_re.match(line)
+            if not match:
+                continue
+
+            address, value = match.groups()
+            if not value.startswith("<String"):
+                continue
+
+            address = address.lower()
+            decoded = _decode_printed_string(value)
+            previous = known_constant_values.get(address)
+            if previous is not None and previous != decoded:
+                conflicts += 1
+                continue
+            known_constant_values[address] = decoded
+
+    print(
+        f"Recovered {len(known_constant_values)} cache-local string identities "
+        f"from disassembly address reuse."
+    )
+    if conflicts:
+        print(f"[!] Ignored {conflicts} conflicting constant-address mapping(s).")
+
+
+def resolve_opaque_constant(value):
+    match = re.fullmatch(r"(?:RawConst|ROConst)_(0x[0-9a-fA-F]+)", value)
+    if not match:
+        return None
+    return known_constant_values.get(match.group(1).lower())
+
 def parse_const_line(lines, func_name):
     var_line = next(lines)
     match = re.search(r"^(\d+(?:\-\d+)?):\s(0x[0-9a-fA-F]+\s)?(.+)", var_line)
@@ -73,17 +131,14 @@ def parse_const_line(lines, func_name):
     idx_range, address, value = match.groups()
     var_idx = int(idx_range.split('-')[-1]) + 1
 
+    resolved = resolve_opaque_constant(value)
+    if resolved is not None:
+        return var_idx, resolved
+
     if not address:
         return var_idx, value
     if value.startswith("<String"):
-        # Keep whitespace that belongs to the string itself.
-        # Example: <String[6]: #Hello > must become "Hello ", not "Hello".
-        raw = value.split("#", 1)[-1]
-        if raw.endswith(">"):
-            raw = raw[:-1]
-        value = json.dumps(raw) #.replace('"', '\"')
-        #return var_idx, f'"{value}"'
-        return var_idx, value
+        return var_idx, _decode_printed_string(value)
     if value.startswith("<SharedFunctionInfo"):
         value = value.split(" ", 1)[-1].rstrip('> ') if " " in value else ""
         return var_idx, parse_shared_function_info(lines, value, func_name)
@@ -199,7 +254,11 @@ def parse_shared_function_info(lines, name, declarer=None):
     sfi.name = 'func_unknown'
     address = ""
     while (line := next(lines)) not in ("End SharedFunctionInfo", None):
-        if "Parameter count" in line:
+        if line.startswith("- name_ref:"):
+            ref = line.split(":", 1)[1].strip()
+            if re.fullmatch(r"(?:ROConst|RawConst)_0x[0-9a-fA-F]+", ref):
+                sfi.name_ref = ref
+        elif "Parameter count" in line:
             sfi.argument_count = parse_parameter_count(line)
         elif "Register count" in line:
             sfi.register_count = parse_register_count(line)
@@ -222,6 +281,9 @@ def parse_shared_function_info(lines, name, declarer=None):
 
 
 def parse_file(file="test.txt"):
+    all_functions.clear()
+    collect_known_constant_values(file)
+
     lines = get_next_line(file)
     while next(lines) != "Start SharedFunctionInfo":
         pass

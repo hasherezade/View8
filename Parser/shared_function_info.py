@@ -15,6 +15,9 @@ class GlobalVars:
     def __init__(self):
         self.strings_set = None
         self.funcs_map = None
+        # Opaque V8 13.x global-name references (ROConst_/RawConst_) can be
+        # correlated with SharedFunctionInfo::Name() pointer identities.
+        self.opaque_func_refs = {}
 
     def parse(self, value) -> bool:
         is_parsed = False
@@ -60,6 +63,13 @@ class GlobalVars:
                 return True
             return False
 
+        # V8 13 analysis mode: LdaGlobal/StaGlobal may carry an opaque pointer
+        # identity instead of the producer snapshot's internalized name string.
+        # If exactly one SharedFunctionInfo has the same shared-name identity,
+        # resolve the global directly to that function.
+        if re.fullmatch(r"(?:ROConst|RawConst)_0x[0-9a-fA-F]+", value):
+            return self.opaque_func_refs.get(value.lower())
+
         if not self.is_filled():
             return None
 
@@ -91,6 +101,10 @@ class SharedFunctionInfo:
         self.exception_table = None
         self.visible = True
         self.metadata = None
+        # Pointer identity of SharedFunctionInfo::Name() as printed by the
+        # analysis-only V8 disassembler. The pointed-to string is not
+        # dereferenced when the producer read-only snapshot differs.
+        self.name_ref = None
 
     def is_fully_parsed(self):
         return all(
@@ -128,20 +142,32 @@ class SharedFunctionInfo:
 
         patternDef = re.compile(r'ConstPoolLiteral\[(\d+)\]')
 
+        found = False
         for obj in self.code:
             line = obj.decompiled
-            if "DeclareGlobals(" not in line:
-                continue
-            match = re.search(patternDef, line.strip())
-            if not match:
-                continue
-            index = int(match.group(1))
-            # Ensure const_pool exists and index is within valid bounds; otherwise skip
-            if self.const_pool is None or not (0 <= index < len(self.const_pool)):
-                continue
-            if global_vars.parse(self.const_pool[index]):
-                return True
-        return False
+
+            # Legacy path: DeclareGlobals contains the complete declaration
+            # array when the constant pool can be printed recursively.
+            if "DeclareGlobals(" in line:
+                match = re.search(patternDef, line.strip())
+                if match:
+                    index = int(match.group(1))
+                    if self.const_pool is not None and 0 <= index < len(self.const_pool):
+                        found = global_vars.parse(self.const_pool[index]) or found
+
+            # V8 13 analysis mode can intentionally keep the DeclareGlobals
+            # array opaque.  StaGlobal still names every global being assigned,
+            # so recover declared-global identities directly from those operands.
+            inst = getattr(obj, "v8_instruction", "") or ""
+            match = re.match(r"StaGlobal(?:\.\w+)?\s+\[(\d+)\]", inst)
+            if match:
+                index = int(match.group(1))
+                if self.const_pool is not None and 0 <= index < len(self.const_pool):
+                    value = self.const_pool[index]
+                    if value.startswith('"') and value.endswith('"'):
+                        found = global_vars.parse(value) or found
+
+        return found
 
     def replace_const_pool(self, global_vars: GlobalVars):
 
@@ -157,6 +183,15 @@ class SharedFunctionInfo:
                 global_symbol = global_vars.resolve_global_name(value)
                 if global_symbol:
                     return global_symbol
+
+                # In V8 13 analysis mode, unresolved constant-pool entries used
+                # by LdaGlobal/StaGlobal still identify a global *name*, even
+                # when the actual internalized string lives in the producer's
+                # mismatched read-only snapshot. Preserve that identity as a
+                # synthetic global symbol so assignments and later loads can be
+                # linked and propagated.
+                if re.fullmatch(r"(?:ROConst|RawConst)_0x[0-9a-fA-F]+", value):
+                    return "global_" + value
 
                 return value.strip('"')
             return value
