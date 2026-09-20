@@ -40,10 +40,60 @@ def parse_array(lines, func_name):
 def parse_object(lines, func_name):
     if "Start " not in (line := next(lines)):
         raise Exception(f"Error got line \"{line}\" not Start Object")
-    const_list = iter(parse_const_array(lines, func_name)[1:])
-    object_literal = "{" + ", ".join([f"{key}: {value}" for key, value in zip(const_list, const_list)]) + "}"
+
+    # V8 <= 10 prints ObjectBoilerplateDescription as a FixedArray-like
+    # object with `- length:` and stores flags in slot 0.
+    # V8 13 prints metadata separately (`- capacity:`, `- flags:`,
+    # `- elements:`), so the element list contains only key/value pairs.
+    is_modern = False
+    size = None
+    while True:
+        line = next(lines)
+        if line is None:
+            raise ValueError("Unexpected EOF while parsing ObjectBoilerplateDescription")
+        if "- length:" in line:
+            size = int(line.split(":", 1)[1].strip())
+            break
+        if "- capacity:" in line:
+            size = int(line.split(":", 1)[1].strip())
+            is_modern = True
+            break
+
+    if is_modern:
+        while (line := next(lines)) != "- elements:":
+            if line is None:
+                raise ValueError("Unexpected EOF before object elements")
+
+    if not size:
+        const_list = []
+    else:
+        while not (line := next(lines)).startswith("0"):
+            if line is None:
+                raise ValueError("Unexpected EOF before object elements")
+        set_repeat_line_flag(True)
+
+        value = ""
+        next_idx = 0
+        const_list = []
+        for idx in range(size):
+            if next_idx != idx:
+                const_list.append(value)
+                continue
+            next_idx, value = parse_const_line(lines, func_name)
+            const_list.append(value)
+
+    # Old layout: slot 0 is the flags Smi. New layout prints flags separately.
+    if not is_modern:
+        const_list = const_list[1:]
+
+    const_iter = iter(const_list)
+    object_literal = "{" + ", ".join(
+        [f"{key}: {value}" for key, value in zip(const_iter, const_iter)]
+    ) + "}"
+
     while "End " not in (line := next(lines)):
-        pass
+        if line is None:
+            raise ValueError("Unexpected EOF while finishing ObjectBoilerplateDescription")
     return object_literal
 
 
@@ -153,7 +203,10 @@ def parse_register_count(line):
 
 
 def parse_address(line):
-    return parse("{}: [{}] in {}", line)[0]
+    match = re.match(r"^(?:0x)?([0-9a-fA-F]+): \[[^\]]+\](?: in .+)?$", line)
+    if not match:
+        raise ValueError(f"Invalid object address line: {line}")
+    return f"0x{int(match.group(1), 16):x}"
 
 
 def parse_shared_function_info(lines, name, declarer=None):
