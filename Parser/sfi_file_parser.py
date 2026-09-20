@@ -143,6 +143,15 @@ def parse_const_line(lines, func_name):
         return var_idx, parse_object(lines, func_name)
     if value.startswith("<Odd Oddball"):
         return var_idx, "null"
+    # V8 13 prints internal Oddball sentinels directly instead of as
+    # `<Odd Oddball: ...>`. Object boilerplate descriptions use
+    # `<uninitialized_value>` as a placeholder for properties whose values are
+    # filled by subsequent bytecodes. Keep View8's historical representation
+    # of these internal sentinel values as `null`: this is not intended to
+    # recover a JavaScript runtime value, but keeps the pseudocode object
+    # literal JSON-compatible for downstream propagation passes.
+    if value in {"<uninitialized_value>", "<the_hole_value>"}:
+        return var_idx, "null"
     return var_idx, value.rstrip('>').split(" ", 1)[-1]
 
 
