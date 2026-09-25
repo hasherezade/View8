@@ -90,6 +90,13 @@ def find_non_default_constructor_or_construct(obj):
     return f"FindNonDefaultConstructorOrConstruct({', '.join(obj.args)})"
 
 
+def unsupported_operator(obj):
+    # Keep decompilation unattended. Preserve the unsupported operation in the
+    # pseudocode instead of stopping for interactive input or silently dropping it.
+    args = f" {', '.join(obj.args)}" if obj.args else ""
+    return f"// Unsupported V8 operator: {obj.operator}{args}"
+
+
 operands = {
     #################
     # call operands #
@@ -372,7 +379,7 @@ operands = {
     "ForInNext": lambda obj: f"ACCU = {obj.args[0]}.next().value",
     "ForInStep": lambda obj: f"ACCU = GeneratorStep({obj.args[0]})",
 
-    "Not Found": lambda obj: input(f"Operator {obj.operator} was not found in table") and f"//{obj.operator})",
+    "Not Found": unsupported_operator,
 
 }
 
